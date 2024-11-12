@@ -21,7 +21,7 @@ LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
 
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
-    raise Exception('กรุณาตั้งค่า LINE_CHANNEL_ACCESS_TOKEN และ LINE_CHANNEL_SECRET')
+    raise Exception('กรุณาตั้งค่า LINE_CHANNEL_ACCESS_TOKEN และ LINE_CHANNEL_SECRET ใน Environment Variables')
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
@@ -152,6 +152,10 @@ def health_check():
         'timestamp': datetime.now().isoformat()
     })
 
+@app.route("/")
+def home():
+    return "LINE Bot is running!"
+
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -183,6 +187,12 @@ def handle_message(event):
                 _, date, title, *desc = text.split()
                 description = ' '.join(desc)
                 
+                # ตรวจสอบรูปแบบวันที่
+                try:
+                    datetime.strptime(date, '%Y-%m-%d')
+                except ValueError:
+                    raise ValueError("รูปแบบวันที่ไม่ถูกต้อง กรุณาใช้รูปแบบ YYYY-MM-DD")
+                
                 # สร้างและส่ง Flex Message
                 flex_message = event_manager.add_event(date, title, description, user_id, user_name)
                 
@@ -195,9 +205,13 @@ def handle_message(event):
                         TextSendMessage(text='กรุณาใช้คำสั่งในกลุ่มเท่านั้น')
                     )
                 
+            except ValueError as ve:
+                error_message = TextSendMessage(
+                    text=f'ข้อผิดพลาด: {str(ve)}\nกรุณาใช้: /add YYYY-MM-DD หัวข้อ รายละเอียด'
+                )
+                line_bot_api.reply_message(event.reply_token, error_message)
             except Exception as e:
                 logger.error(f"Error handling /add command: {str(e)}")
-                # ส่งข้อความผิดพลาดแบบส่วนตัว
                 error_message = TextSendMessage(
                     text='รูปแบบคำสั่งไม่ถูกต้อง\nกรุณาใช้: /add YYYY-MM-DD หัวข้อ รายละเอียด'
                 )
