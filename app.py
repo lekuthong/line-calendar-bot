@@ -1,4 +1,4 @@
-from flask import Flask, request, abort
+from flask import Flask, request, abort, jsonify
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
@@ -7,11 +7,21 @@ from linebot.models import (
 )
 from datetime import datetime, timedelta
 import json
+import os
+import logging
+
+# ตั้งค่า logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-LINE_CHANNEL_ACCESS_TOKEN = 'df6f9bbeb2bc9974136e7472e1766ebe'
-LINE_CHANNEL_SECRET = 'HFIYFXcVSxi8fBDOXyt424XGKNHHjv6llGdnMCudwRxqfCbWGvH7AYEFmXUZ7kFtu8mXbcm0o8d87KgCamxzBVP3sTj+qSscSGZIBfq2u5JdlwbejkjyVNKUkzVLy0UJ76dPdHwTBIlicebuc7GEXgdB04t89/1O/w1cDnyilFU='
+# ใช้ Environment Variables
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
+LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
+
+if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
+    raise Exception('กรุณาตั้งค่า LINE_CHANNEL_ACCESS_TOKEN และ LINE_CHANNEL_SECRET')
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
@@ -19,19 +29,28 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 class EventManager:
     def __init__(self):
         self.events = {}
+        self.logger = logging.getLogger(__name__)
     
     def add_event(self, date, title, description, creator_id, creator_name):
-        if date not in self.events:
-            self.events[date] = []
-        event = {
-            'title': title,
-            'description': description,
-            'creator_id': creator_id,
-            'creator_name': creator_name,
-            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        }
-        self.events[date].append(event)
-        return self.create_flex_message(date, event)
+        try:
+            if date not in self.events:
+                self.events[date] = []
+            
+            event = {
+                'title': title,
+                'description': description,
+                'creator_id': creator_id,
+                'creator_name': creator_name,
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            
+            self.events[date].append(event)
+            self.logger.info(f"เพิ่มกิจกรรมสำเร็จ: {title} วันที่ {date}")
+            
+            return self.create_flex_message(date, event)
+        except Exception as e:
+            self.logger.error(f"เกิดข้อผิดพลาดในการเพิ่มกิจกรรม: {str(e)}")
+            raise
 
     def create_flex_message(self, date, event):
         flex_content = {
@@ -125,50 +144,72 @@ class EventManager:
 
 event_manager = EventManager()
 
+# Health check endpoint
+@app.route("/health")
+def health_check():
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.now().isoformat()
+    })
+
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
+    logger.info("Request body: %s", body)
     
     try:
         handler.handle(body, signature)
+        return 'OK'
     except InvalidSignatureError:
+        logger.error("Invalid signature")
         abort(400)
-    
-    return 'OK'
+    except Exception as e:
+        logger.error(f"Error: {str(e)}")
+        return str(e), 500
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     text = event.message.text
     
-    # ดึงข้อมูลผู้ใช้
-    user_profile = line_bot_api.get_profile(event.source.user_id)
-    user_id = user_profile.user_id
-    user_name = user_profile.display_name
-    
-    if text.startswith('/add'):
-        try:
-            _, date, title, *desc = text.split()
-            description = ' '.join(desc)
-            
-            # สร้างและส่ง Flex Message
-            flex_message = event_manager.add_event(date, title, description, user_id, user_name)
-            
-            # ส่งข้อความไปยังกลุ่ม
-            if event.source.type == 'group':
-                line_bot_api.reply_message(event.reply_token, flex_message)
-            else:
-                line_bot_api.reply_message(
-                    event.reply_token,
-                    TextSendMessage(text='กรุณาใช้คำสั่งในกลุ่มเท่านั้น')
+    try:
+        # ดึงข้อมูลผู้ใช้
+        user_profile = line_bot_api.get_profile(event.source.user_id)
+        user_id = user_profile.user_id
+        user_name = user_profile.display_name
+        
+        if text.startswith('/add'):
+            try:
+                _, date, title, *desc = text.split()
+                description = ' '.join(desc)
+                
+                # สร้างและส่ง Flex Message
+                flex_message = event_manager.add_event(date, title, description, user_id, user_name)
+                
+                # ส่งข้อความไปยังกลุ่ม
+                if event.source.type == 'group':
+                    line_bot_api.reply_message(event.reply_token, flex_message)
+                else:
+                    line_bot_api.reply_message(
+                        event.reply_token,
+                        TextSendMessage(text='กรุณาใช้คำสั่งในกลุ่มเท่านั้น')
+                    )
+                
+            except Exception as e:
+                logger.error(f"Error handling /add command: {str(e)}")
+                # ส่งข้อความผิดพลาดแบบส่วนตัว
+                error_message = TextSendMessage(
+                    text='รูปแบบคำสั่งไม่ถูกต้อง\nกรุณาใช้: /add YYYY-MM-DD หัวข้อ รายละเอียด'
                 )
-            
-        except Exception as e:
-            # ส่งข้อความผิดพลาดแบบส่วนตัว
-            error_message = TextSendMessage(
-                text='รูปแบบคำสั่งไม่ถูกต้อง\nกรุณาใช้: /add YYYY-MM-DD หัวข้อ รายละเอียด'
-            )
-            line_bot_api.reply_message(event.reply_token, error_message)
+                line_bot_api.reply_message(event.reply_token, error_message)
+                
+    except Exception as e:
+        logger.error(f"Error in handle_message: {str(e)}")
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text='เกิดข้อผิดพลาด กรุณาลองใหม่อีกครั้ง')
+        )
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=8000)
+    port = int(os.getenv("PORT", 3000))
+    app.run(host='0.0.0.0', port=port)
