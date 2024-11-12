@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 # โหลด environment variables
 load_dotenv()
 
-# ตั้งค่า logging ให้ละเอียดขึ้น
+# ตั้งค่า logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -34,17 +34,48 @@ if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# เพิ่ม route สำหรับหน้าแรก
-@app.route("/")
+class EventManager:
+    def __init__(self):
+        self.events = {}
+        self.logger = logging.getLogger(__name__)
+    
+    def add_event(self, date, title, description, creator_id, creator_name):
+        try:
+            if date not in self.events:
+                self.events[date] = []
+            
+            event = {
+                'title': title,
+                'description': description,
+                'creator_id': creator_id,
+                'creator_name': creator_name,
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            
+            self.events[date].append(event)
+            self.logger.info(f"เพิ่มกิจกรรมสำเร็จ: {title} วันที่ {date}")
+            
+            return self.create_flex_message(date, event)
+        except Exception as e:
+            self.logger.error(f"เกิดข้อผิดพลาดในการเพิ่มกิจกรรม: {str(e)}")
+            raise
+
+event_manager = EventManager()
+
+# เพิ่ม methods ที่อนุญาต
+@app.route("/", methods=['GET'])
 def home():
     logger.info("Root route accessed")
     return "Line Calendar Bot is running!"
 
-# เพิ่ม route สำหรับ health check
-@app.route("/health")
-def health():
-    logger.info("Health check route accessed")
-    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
+@app.route("/healthz", methods=['GET'])
+def healthz():
+    logger.info("Health check endpoint accessed")
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "version": "1.0.0"
+    }), 200
 
 @app.route("/callback", methods=['POST'])
 def callback():
