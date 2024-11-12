@@ -207,15 +207,13 @@ def handle_message(event):
                 flex_message = event_manager.add_event(date, title, description, user_id, user_name)
                 logger.info(f"Created event: {title}")
                 
-                # ส่งข้อความไปยังกลุ่ม
-                if event.source.type == 'group':
-                    line_bot_api.reply_message(event.reply_token, flex_message)
-                    logger.info("Sent message to group")
+                # ตรวจสอบว่าเป็นข้อความที่ส่งซ้ำหรือไม่
+                if event.delivery_context.is_redelivery:
+                    # ใช้ push_message เมื่อเป็นข้อความส่งซ้ำ
+                    line_bot_api.push_message(event.source.user_id, flex_message)
                 else:
-                    line_bot_api.reply_message(
-                        event.reply_token,
-                        TextSendMessage(text='กรุณาใช้คำสั่งในกลุ่มเท่านั้น')
-                    )
+                    # ใช้ reply_message เมื่อเป็นข้อความปกติ
+                    line_bot_api.reply_message(event.reply_token, flex_message)
                 
             except ValueError as ve:
                 error_message = TextSendMessage(
