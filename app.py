@@ -3,7 +3,7 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage,
-    FlexSendMessage
+    FlexSendMessage, ImageMessage
 )
 from datetime import datetime, timedelta
 import json
@@ -231,10 +231,15 @@ def callback():
         logger.error(f"Error: {str(e)}")
         return str(e), 500
 
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_image_message(event):
+    logger.info("Received image message")
+    return
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     text = event.message.text
-    logger.info(f"Received message: {text}")
+    logger.info(f"Received text message: {text}")
     
     try:
         if text.startswith('/add'):
@@ -262,7 +267,7 @@ def handle_message(event):
                 logger.info(f"Created event: {title}")
                 
                 try:
-                    if event.delivery_context.is_redelivery:
+                    if hasattr(event, 'delivery_context') and event.delivery_context.is_redelivery:
                         logger.info("Redelivery detected, using push_message")
                         message_queue.put({
                             'type': 'push',
@@ -279,7 +284,7 @@ def handle_message(event):
                         })
                     logger.info("Message queued successfully")
                 except Exception as send_error:
-                    logger.error(f"Error queuing message: {str(send_error)}")
+                    logger.error(f"Error sending message: {str(send_error)}")
                     raise
                 
             except ValueError as ve:
@@ -289,11 +294,12 @@ def handle_message(event):
                 line_bot_api.reply_message(event.reply_token, error_message)
             except Exception as e:
                 logger.error(f"Error handling /add command: {str(e)}")
-                error_message = TextSendMessage(
-                    text=handle_line_bot_error(e)
-                )
+                error_message = TextSendMessage(text=handle_line_bot_error(e))
                 line_bot_api.reply_message(event.reply_token, error_message)
-                
+        else:
+            logger.info("Message is not a command")
+            # Optional: Send help message for non-command messages
+            
     except Exception as e:
         logger.error(f"Error in handle_message: {str(e)}")
         error_message = TextSendMessage(text=handle_line_bot_error(e))
@@ -302,6 +308,17 @@ def handle_message(event):
 if __name__ == "__main__":
     try:
         port = int(os.environ.get("PORT", 10000))
-        app.run(host='0.0.0.0', port=port, threaded=True)
+        # เพิ่มการตั้งค่า gunicorn
+        options = {
+            'bind': f'0.0.0.0:{port}',
+            'workers': 3,
+            'worker_class': 'sync',
+            'timeout': 120,
+            'keepalive': 5,
+            'max_requests': 200,
+            'max_requests_jitter': 50,
+        }
+        
+        app.run(**options)
     except Exception as e:
         logger.error(f"Error starting server: {e}")
