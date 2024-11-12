@@ -2,9 +2,8 @@ from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
-    MessageEvent, TextMessage,
-    FlexSendMessage, BubbleContainer,
-    GroupEventMessage
+    MessageEvent, TextMessage, TextSendMessage,
+    FlexSendMessage
 )
 from datetime import datetime, timedelta
 import json
@@ -32,51 +31,97 @@ class EventManager:
             'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
         self.events[date].append(event)
-        return self.create_group_tab_message(date, event)
+        return self.create_flex_message(date, event)
 
-    def create_group_tab_message(self, date, event):
-        return {
-            "type": "group_event",
-            "title": event['title'],
-            "description": event['description'],
-            "date": date,
-            "creator": event['creator_name'],
-            "content": {
-                "type": "bubble",
-                "body": {
-                    "type": "box",
-                    "layout": "vertical",
-                    "contents": [
-                        {
-                            "type": "text",
-                            "text": event['title'],
-                            "weight": "bold",
-                            "size": "xl"
-                        },
-                        {
-                            "type": "text",
-                            "text": event['description'],
-                            "margin": "md",
-                            "wrap": True
-                        },
-                        {
-                            "type": "text",
-                            "text": f"วันที่: {date}",
-                            "margin": "md",
-                            "size": "sm",
-                            "color": "#888888"
-                        },
-                        {
-                            "type": "text",
-                            "text": f"สร้างโดย: {event['creator_name']}",
-                            "margin": "sm",
-                            "size": "sm",
-                            "color": "#888888"
-                        }
-                    ]
-                }
+    def create_flex_message(self, date, event):
+        flex_content = {
+            "type": "bubble",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "✨ กิจกรรมใหม่",
+                        "weight": "bold",
+                        "color": "#1DB446",
+                        "size": "sm"
+                    },
+                    {
+                        "type": "text",
+                        "text": event['title'],
+                        "weight": "bold",
+                        "size": "xxl",
+                        "margin": "md",
+                        "wrap": True
+                    },
+                    {
+                        "type": "text",
+                        "text": event['description'],
+                        "size": "md",
+                        "color": "#666666",
+                        "margin": "sm",
+                        "wrap": True
+                    },
+                    {
+                        "type": "separator",
+                        "margin": "xxl"
+                    },
+                    {
+                        "type": "box",
+                        "layout": "vertical",
+                        "margin": "md",
+                        "spacing": "sm",
+                        "contents": [
+                            {
+                                "type": "box",
+                                "layout": "horizontal",
+                                "contents": [
+                                    {
+                                        "type": "text",
+                                        "text": "วันที่",
+                                        "size": "sm",
+                                        "color": "#888888",
+                                        "flex": 1
+                                    },
+                                    {
+                                        "type": "text",
+                                        "text": date,
+                                        "size": "sm",
+                                        "color": "#111111",
+                                        "flex": 2
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "box",
+                                "layout": "horizontal",
+                                "contents": [
+                                    {
+                                        "type": "text",
+                                        "text": "ผู้สร้าง",
+                                        "size": "sm",
+                                        "color": "#888888",
+                                        "flex": 1
+                                    },
+                                    {
+                                        "type": "text",
+                                        "text": event['creator_name'],
+                                        "size": "sm",
+                                        "color": "#111111",
+                                        "flex": 2
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
             }
         }
+        return FlexSendMessage(
+            alt_text=f"กิจกรรมใหม่: {event['title']}",
+            contents=flex_content
+        )
 
 event_manager = EventManager()
 
@@ -106,21 +151,24 @@ def handle_message(event):
             _, date, title, *desc = text.split()
             description = ' '.join(desc)
             
-            # สร้างกิจกรรมในแถบกิจกรรมกลุ่ม
-            group_event = event_manager.add_event(date, title, description, user_id, user_name)
+            # สร้างและส่ง Flex Message
+            flex_message = event_manager.add_event(date, title, description, user_id, user_name)
             
-            # ส่ง Group Event Message
-            line_bot_api.push_message(
-                event.source.group_id,
-                GroupEventMessage(**group_event)
-            )
+            # ส่งข้อความไปยังกลุ่ม
+            if event.source.type == 'group':
+                line_bot_api.reply_message(event.reply_token, flex_message)
+            else:
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text='กรุณาใช้คำสั่งในกลุ่มเท่านั้น')
+                )
             
         except Exception as e:
-            # ส่งข้อความผิดพลาดแบบส่วนตัวไปยังผู้สร้างกิจกรรม
-            line_bot_api.push_message(
-                user_id,
-                TextMessage(text='รูปแบบคำสั่งไม่ถูกต้อง กรุณาใช้: /add YYYY-MM-DD หัวข้อ รายละเอียด')
+            # ส่งข้อความผิดพลาดแบบส่วนตัว
+            error_message = TextSendMessage(
+                text='รูปแบบคำสั่งไม่ถูกต้อง\nกรุณาใช้: /add YYYY-MM-DD หัวข้อ รายละเอียด'
             )
+            line_bot_api.reply_message(event.reply_token, error_message)
 
 if __name__ == "__main__":
-    app.run()
+    app.run(host='0.0.0.0', port=8000)
