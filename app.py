@@ -1,6 +1,6 @@
 from flask import Flask, request, abort, jsonify
 from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
+from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage,
     FlexSendMessage
@@ -9,12 +9,15 @@ from datetime import datetime, timedelta
 import json
 import os
 import logging
+import requests.exceptions
+from queue import Queue
+from threading import Thread
 
 # ตั้งค่า logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# สร้าง Flask app - ต้องอยู่ก่อน import อื่นๆ
+# สร้าง Flask app
 app = Flask(__name__)
 
 # ใช้ Environment Variables
@@ -24,8 +27,37 @@ LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
     raise Exception('กรุณาตั้งค่า LINE_CHANNEL_ACCESS_TOKEN และ LINE_CHANNEL_SECRET')
 
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+# สร้าง LINE API instance พร้อม timeout
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN, timeout=30)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
+# สร้าง message queue
+message_queue = Queue()
+
+def process_message_queue():
+    while True:
+        if not message_queue.empty():
+            msg_data = message_queue.get()
+            try:
+                if msg_data['type'] == 'push':
+                    line_bot_api.push_message(
+                        msg_data['user_id'],
+                        msg_data['message']
+                    )
+                elif msg_data['type'] == 'reply':
+                    line_bot_api.reply_message(
+                        msg_data['reply_token'],
+                        msg_data['message']
+                    )
+                logger.info(f"Successfully processed queued message for {msg_data['user_id']}")
+            except Exception as e:
+                logger.error(f"Error processing queued message: {str(e)}")
+            finally:
+                message_queue.task_done()
+
+# เริ่ม worker thread
+worker_thread = Thread(target=process_message_queue, daemon=True)
+worker_thread.start()
 
 class EventManager:
     def __init__(self):
@@ -69,7 +101,7 @@ class EventManager:
                     },
                     {
                         "type": "text",
-                        "text": event['title'] or "ไม่มีหัวข้อ",  # เพิ่มค่าเริ่มต้น
+                        "text": event['title'] or "ไม่มีหัวข้อ",
                         "weight": "bold",
                         "size": "xxl",
                         "margin": "md",
@@ -77,7 +109,7 @@ class EventManager:
                     },
                     {
                         "type": "text",
-                        "text": event['description'] or "ไม่มีรายละเอียด",  # เพิ่มค่าเริ่มต้น
+                        "text": event['description'] or "ไม่มีรายละเอียด",
                         "size": "md",
                         "color": "#666666",
                         "margin": "sm",
@@ -126,7 +158,7 @@ class EventManager:
                                     },
                                     {
                                         "type": "text",
-                                        "text": event['creator_name'] or "ไม่ระบุ",  # เพิ่มค่าเริ่มต้น
+                                        "text": event['creator_name'] or "ไม่ระบุ",
                                         "size": "sm",
                                         "color": "#111111",
                                         "flex": 2
@@ -143,9 +175,27 @@ class EventManager:
             contents=flex_content
         )
 
+def handle_line_bot_error(e):
+    if isinstance(e, LineBotApiError):
+        if e.status_code == 429:
+            return "ระบบกำลังมีการใช้งานมาก กรุณาลองใหม่ในภายหลัง"
+        elif e.status_code == 500:
+            return "เซิร์ฟเวอร์ LINE ขัดข้อง กรุณาลองใหม่ภายหลัง"
+    return "เกิดข้อผิดพลาด กรุณาลองใหม่อีกครั้ง"
+
+def clear_pending_messages(user_id):
+    try:
+        line_bot_api.push_message(
+            user_id,
+            TextSendMessage(text="กำลังรีเซ็ตระบบข้อความ...")
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error clearing messages: {str(e)}")
+        return False
+
 event_manager = EventManager()
 
-# Health check endpoint
 @app.route("/health")
 def health_check():
     return jsonify({
@@ -156,6 +206,14 @@ def health_check():
 @app.route("/")
 def home():
     return "LINE Bot is running!"
+
+@app.route("/reset", methods=['POST'])
+def reset_messages():
+    user_id = request.json.get('user_id')
+    if user_id:
+        success = clear_pending_messages(user_id)
+        return jsonify({'success': success})
+    return jsonify({'success': False, 'error': 'No user_id provided'})
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -180,40 +238,49 @@ def handle_message(event):
     
     try:
         if text.startswith('/add'):
+            logger.info(f"Processing add command: {text}")
             try:
-                # แยกคำสั่งเป็น 3 ส่วน: command, date, และ title_and_desc
                 parts = text.split(' ', 2)
                 if len(parts) < 3:
                     raise ValueError("ข้อมูลไม่ครบถ้วน")
                 
                 _, date, title_and_desc = parts
-                # แยกหัวข้อและรายละเอียด (ถ้ามี)
                 title_parts = title_and_desc.split(' ', 1)
                 title = title_parts[0]
                 description = title_parts[1] if len(title_parts) > 1 else ""
                 
-                # ตรวจสอบรูปแบบวันที่
                 try:
                     datetime.strptime(date, '%Y-%m-%d')
                 except ValueError:
                     raise ValueError("รูปแบบวันที่ไม่ถูกต้อง กรุณาใช้รูปแบบ YYYY-MM-DD")
                 
-                # ดึงข้อมูลผู้ใช้
                 user_profile = line_bot_api.get_profile(event.source.user_id)
                 user_id = user_profile.user_id
                 user_name = user_profile.display_name
                 
-                # สร้างและส่ง Flex Message
                 flex_message = event_manager.add_event(date, title, description, user_id, user_name)
                 logger.info(f"Created event: {title}")
                 
-                # ตรวจสอบว่าเป็นข้อความที่ส่งซ้ำหรือไม่
-                if event.delivery_context.is_redelivery:
-                    # ใช้ push_message เมื่อเป็นข้อความส่งซ้ำ
-                    line_bot_api.push_message(event.source.user_id, flex_message)
-                else:
-                    # ใช้ reply_message เมื่อเป็นข้อความปกติ
-                    line_bot_api.reply_message(event.reply_token, flex_message)
+                try:
+                    if event.delivery_context.is_redelivery:
+                        logger.info("Redelivery detected, using push_message")
+                        message_queue.put({
+                            'type': 'push',
+                            'user_id': event.source.user_id,
+                            'message': flex_message
+                        })
+                    else:
+                        logger.info("Normal delivery, using reply_message")
+                        message_queue.put({
+                            'type': 'reply',
+                            'reply_token': event.reply_token,
+                            'user_id': event.source.user_id,
+                            'message': flex_message
+                        })
+                    logger.info("Message queued successfully")
+                except Exception as send_error:
+                    logger.error(f"Error queuing message: {str(send_error)}")
+                    raise
                 
             except ValueError as ve:
                 error_message = TextSendMessage(
@@ -223,20 +290,18 @@ def handle_message(event):
             except Exception as e:
                 logger.error(f"Error handling /add command: {str(e)}")
                 error_message = TextSendMessage(
-                    text='รูปแบบคำสั่งไม่ถูกต้อง\nกรุณาใช้: /add YYYY-MM-DD หัวข้อ รายละเอียด'
+                    text=handle_line_bot_error(e)
                 )
                 line_bot_api.reply_message(event.reply_token, error_message)
                 
     except Exception as e:
         logger.error(f"Error in handle_message: {str(e)}")
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text='เกิดข้อผิดพลาด กรุณาลองใหม่อีกครั้ง')
-        )
+        error_message = TextSendMessage(text=handle_line_bot_error(e))
+        line_bot_api.reply_message(event.reply_token, error_message)
 
 if __name__ == "__main__":
     try:
         port = int(os.environ.get("PORT", 10000))
-        app.run(host='0.0.0.0', port=port)
+        app.run(host='0.0.0.0', port=port, threaded=True)
     except Exception as e:
-        print(f"Error starting server: {e}")
+        logger.error(f"Error starting server: {e}")
