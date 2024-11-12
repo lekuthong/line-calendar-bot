@@ -69,7 +69,7 @@ class EventManager:
                     },
                     {
                         "type": "text",
-                        "text": event['title'],
+                        "text": event['title'] or "ไม่มีหัวข้อ",  # เพิ่มค่าเริ่มต้น
                         "weight": "bold",
                         "size": "xxl",
                         "margin": "md",
@@ -77,7 +77,7 @@ class EventManager:
                     },
                     {
                         "type": "text",
-                        "text": event['description'],
+                        "text": event['description'] or "ไม่มีรายละเอียด",  # เพิ่มค่าเริ่มต้น
                         "size": "md",
                         "color": "#666666",
                         "margin": "sm",
@@ -126,7 +126,7 @@ class EventManager:
                                     },
                                     {
                                         "type": "text",
-                                        "text": event['creator_name'],
+                                        "text": event['creator_name'] or "ไม่ระบุ",  # เพิ่มค่าเริ่มต้น
                                         "size": "sm",
                                         "color": "#111111",
                                         "flex": 2
@@ -179,22 +179,29 @@ def handle_message(event):
     logger.info(f"Received message: {text}")
     
     try:
-        # ดึงข้อมูลผู้ใช้
-        user_profile = line_bot_api.get_profile(event.source.user_id)
-        user_id = user_profile.user_id
-        user_name = user_profile.display_name
-        logger.info(f"Message from user: {user_name}")
-        
         if text.startswith('/add'):
             try:
-                _, date, title, *desc = text.split()
-                description = ' '.join(desc)
+                # แยกคำสั่งเป็น 3 ส่วน: command, date, และ title_and_desc
+                parts = text.split(' ', 2)
+                if len(parts) < 3:
+                    raise ValueError("ข้อมูลไม่ครบถ้วน")
+                
+                _, date, title_and_desc = parts
+                # แยกหัวข้อและรายละเอียด (ถ้ามี)
+                title_parts = title_and_desc.split(' ', 1)
+                title = title_parts[0]
+                description = title_parts[1] if len(title_parts) > 1 else ""
                 
                 # ตรวจสอบรูปแบบวันที่
                 try:
                     datetime.strptime(date, '%Y-%m-%d')
                 except ValueError:
                     raise ValueError("รูปแบบวันที่ไม่ถูกต้อง กรุณาใช้รูปแบบ YYYY-MM-DD")
+                
+                # ดึงข้อมูลผู้ใช้
+                user_profile = line_bot_api.get_profile(event.source.user_id)
+                user_id = user_profile.user_id
+                user_name = user_profile.display_name
                 
                 # สร้างและส่ง Flex Message
                 flex_message = event_manager.add_event(date, title, description, user_id, user_name)
